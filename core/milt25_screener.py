@@ -16,7 +16,7 @@ Weekly bars: daily OHLCV resampled to W-FRI.
 "Monday Open" execution is approximated as next trading day's close.
 """
 
-import os
+import os, json
 from datetime import date, datetime, timedelta
 
 import numpy as np
@@ -38,16 +38,34 @@ SHARES_JSON_URL = (
 
 HISTORY_UNIVERSE = "nse_full"   # shared Storage bucket key, maintained by NSE_1000Cr_Momentum
 
-MIN_MCAP_CR   = 1000
-MAX_POSITIONS = 25
-ALLOC_PCT     = 0.04
-HARD_STOP_PCT = 0.20
-BB_PERIOD     = 20
-BB_STD        = 3.7
-EXIT_MA       = 23
-ATR_PERIOD    = 14
-ATR_MULT      = 1.8
-ROC_WEEKS     = 52
+DEFAULT_CONFIG = {
+    "min_mcap":        1000,   # Rs Cr
+    "max_positions":   25,
+    "alloc_pct":       0.04,
+    "hard_stop_pct":   0.20,
+    "bb_period":       20,
+    "bb_std":          3.7,
+    "exit_ma_period":  23,
+    "atr_period":      14,
+    "atr_multiplier":  1.8,
+    "roc_period_weeks": 52,
+}
+
+def load_config():
+    """Start from DEFAULT_CONFIG, override with any keys passed via the
+    SCREEN_PARAMS env var (JSON string, set by repository_dispatch client_payload
+    from the frontend Run button, or workflow_dispatch input)."""
+    cfg = dict(DEFAULT_CONFIG)
+    raw = os.environ.get("SCREEN_PARAMS", "").strip()
+    if raw:
+        try:
+            overrides = json.loads(raw)
+            for k, v in overrides.items():
+                if k in cfg and v is not None:
+                    cfg[k] = v
+        except Exception as e:
+            print(f"  WARNING: could not parse SCREEN_PARAMS ({e}); using defaults")
+    return cfg
 
 BOOTSTRAP_LOOKBACK_DAYS = 750   # only used if no stored history exists at all
 
@@ -134,27 +152,27 @@ def load_ohlcv(supabase, tickers):
 
 
 # ── Weekly indicators ─────────────────────────────────────────────────────────
-def weekly_indicators(close_d, high_d, low_d):
+def weekly_indicators(close_d, high_d, low_d, cfg):
     w_close = close_d.resample("W-FRI").last()
     w_high  = high_d.resample("W-FRI").max()
     w_low   = low_d.resample("W-FRI").min()
     w_high  = w_high.combine_first(w_close)
     w_low   = w_low.combine_first(w_close)
 
-    basis    = w_close.rolling(BB_PERIOD).mean()
-    stdev    = w_close.rolling(BB_PERIOD).std(ddof=0)  # population std (TradingView-standard), not pandas sample default
-    bb_upper = basis + BB_STD * stdev
+    basis    = w_close.rolling(cfg["bb_period"]).mean()
+    stdev    = w_close.rolling(cfg["bb_period"]).std(ddof=0)  # population std (TradingView-standard), not pandas sample default
+    bb_upper = basis + cfg["bb_std"] * stdev
 
-    exit_sma = w_close.rolling(EXIT_MA).mean()
+    exit_sma = w_close.rolling(cfg["exit_ma_period"]).mean()
 
     prev_c = w_close.shift(1)
     tr1 = (w_high - w_low).abs()
     tr2 = (w_high - prev_c).abs()
     tr3 = (w_low  - prev_c).abs()
     tr  = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = tr.rolling(ATR_PERIOD).mean()
+    atr = tr.rolling(cfg["atr_period"]).mean()
 
-    roc_12m = (w_close - w_close.shift(ROC_WEEKS)) / w_close.shift(ROC_WEEKS) * 100
+    roc_12m = (w_close - w_close.shift(cfg["roc_period_weeks"])) / w_close.shift(cfg["roc_period_weeks"]) * 100
 
     return w_close, w_high, bb_upper, exit_sma, atr, roc_12m
 
@@ -175,6 +193,8 @@ def run():
     print(f"{'='*60}")
 
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    cfg = load_config()
+    print(f"\nConfig: {json.dumps(cfg)}")
 
     print("\n[1] Loading universe (shares_outstanding.json)...")
     shares = load_shares()
@@ -196,15 +216,15 @@ def run():
             mcap_cr[t] = None
 
     eligible = [t for t in tickers
-                if mcap_cr.get(t) and mcap_cr[t] >= MIN_MCAP_CR and t in close_d.columns]
-    print(f"    {len(eligible)} tickers pass MCap >= Rs{MIN_MCAP_CR} Cr filter")
+                if mcap_cr.get(t) and mcap_cr[t] >= cfg["min_mcap"] and t in close_d.columns]
+    print(f"    {len(eligible)} tickers pass MCap >= Rs{cfg['min_mcap']} Cr filter")
 
     print("\n[4] Computing weekly indicators...")
     c_elig = close_d[eligible]
     h_elig = high_d[eligible]
     l_elig = low_d[eligible]
     w_close, w_high, bb_upper, exit_sma, atr, roc_12m = weekly_indicators(
-        c_elig, h_elig, l_elig
+        c_elig, h_elig, l_elig, cfg
     )
 
     w_idx = w_close.index
@@ -241,8 +261,8 @@ def run():
         ma = float(exit_sma[ticker].get(last_friday, np.nan))
         a  = float(atr[ticker].get(last_friday, np.nan))
 
-        hard_stop  = float(pos["entry_price"]) * (1 - HARD_STOP_PCT)
-        trail_stop = (new_hh - ATR_MULT * a) if not np.isnan(a) else float("nan")
+        hard_stop  = float(pos["entry_price"]) * (1 - cfg["hard_stop_pct"])
+        trail_stop = (new_hh - cfg["atr_multiplier"] * a) if not np.isnan(a) else float("nan")
 
         reason = None
         if not np.isnan(c):
@@ -285,8 +305,8 @@ def run():
         sb_patch("milt25_positions", f"ticker=eq.{ticker}&status=eq.open", update_payload)
 
     remaining_open = [p["ticker"] for p in open_positions if p["ticker"] not in positions_to_close]
-    free_slots = MAX_POSITIONS - len(remaining_open)
-    print(f"\n    Remaining positions: {len(remaining_open)} / {MAX_POSITIONS}  "
+    free_slots = cfg["max_positions"] - len(remaining_open)
+    print(f"\n    Remaining positions: {len(remaining_open)} / {cfg['max_positions']}  "
           f"(free slots: {free_slots})")
 
     last_run = sb_get("milt25_runs", "order=triggered_at.desc&limit=1")
@@ -337,8 +357,9 @@ def run():
                 "roc_12m": row["roc_12m"], "mcap_cr": row["mcap_cr"],
             })
 
-    # Sort universe by ROC 12M desc for a sensible default frontend view
-    universe_snapshot.sort(key=lambda x: x["roc_12m"] if x["roc_12m"] is not None else -1e9, reverse=True)
+    # Sort universe by distance to BB upper band descending (closest to / already past
+    # the breakout line first) -- directly answers "how close is the market to signals"
+    universe_snapshot.sort(key=lambda x: x["dist_to_bb_pct"] if x["dist_to_bb_pct"] is not None else -1e9, reverse=True)
 
     candidates.sort(key=lambda x: x["roc_12m"] or -1e9, reverse=True)
     to_buy = candidates[:free_slots]
@@ -350,11 +371,11 @@ def run():
     for cand in to_buy:
         ticker     = cand["ticker"]
         exec_price = cand["close"]
-        alloc      = portfolio_equity * ALLOC_PCT
+        alloc      = portfolio_equity * cfg["alloc_pct"]
         shares_qty = int(alloc / exec_price) if exec_price > 0 else 0
         if shares_qty <= 0:
             continue
-        hard_stop = round(exec_price * (1 - HARD_STOP_PCT), 2)
+        hard_stop = round(exec_price * (1 - cfg["hard_stop_pct"]), 2)
 
         sb_post("milt25_positions", {
             "ticker": ticker, "entry_date": str(today), "entry_price": exec_price,
@@ -387,13 +408,13 @@ def run():
         "portfolio_equity": round(portfolio_equity_final, 2), "cash": round(cash, 2),
         "open_positions": len(all_open_after), "new_entries": new_entries,
         "exits": exits, "signals": candidates, "eligible_universe": len(eligible),
-        "universe": universe_snapshot,
+        "universe": universe_snapshot, "config_used": cfg,
         "status": "completed", "triggered_at": datetime.utcnow().isoformat(),
     })
 
     print(f"\n{'='*60}")
     print(f"  Run complete. Signal week: {last_friday.date()}")
-    print(f"  Open: {len(all_open_after)}/{MAX_POSITIONS}  Buys: {len(new_entries)}  Exits: {len(exits)}")
+    print(f"  Open: {len(all_open_after)}/{cfg['max_positions']}  Buys: {len(new_entries)}  Exits: {len(exits)}")
     print(f"  Portfolio Rs: {portfolio_equity_final:,.2f}   Cash Rs: {cash:,.2f}")
     print(f"{'='*60}\n")
 
