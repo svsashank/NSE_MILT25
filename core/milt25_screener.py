@@ -142,7 +142,7 @@ def weekly_indicators(close_d, high_d, low_d):
     w_low   = w_low.combine_first(w_close)
 
     basis    = w_close.rolling(BB_PERIOD).mean()
-    stdev    = w_close.rolling(BB_PERIOD).std()
+    stdev    = w_close.rolling(BB_PERIOD).std(ddof=0)  # population std (TradingView-standard), not pandas sample default
     bb_upper = basis + BB_STD * stdev
 
     exit_sma = w_close.rolling(EXIT_MA).mean()
