@@ -195,8 +195,19 @@ def run():
     )
 
     # Last completed weekly bar (most recent W-FRI <= today)
+    # Weekly index may be tz-aware (UTC) or tz-naive depending on yfinance version.
+    # Normalize: strip tz from index for comparison, then use the raw index value.
+    w_idx = w_close.index
+    if w_idx.tz is not None:
+        w_idx_naive = w_idx.tz_convert("UTC").tz_localize(None)
+    else:
+        w_idx_naive = w_idx
+
     today_ts = pd.Timestamp(today)
-    completed_weeks = w_close.index[w_close.index <= today_ts]
+    # Include today if it is a Friday (the current week's bar)
+    cutoff = today_ts + pd.Timedelta(days=1)
+    mask = w_idx_naive < cutoff
+    completed_weeks = w_idx[mask]
     if len(completed_weeks) == 0:
         print("No completed weekly bars -- exiting.")
         return
@@ -319,6 +330,14 @@ def run():
 
     candidates.sort(key=lambda x: x["roc_12m"] or -1e9, reverse=True)
     to_buy = candidates[:free_slots]
+
+    # Debug: sample a few tickers to diagnose zero-signal runs
+    if len(candidates) == 0 and len(eligible) > 0:
+        sample = eligible[:5]
+        for t in sample:
+            c  = w_close[t].get(last_friday, np.nan) if t in w_close.columns else np.nan
+            bb = bb_upper[t].get(last_friday, np.nan) if t in bb_upper.columns else np.nan
+            print(f"    DEBUG {t}: close={c:.2f if pd.notna(c) else c}  bb_upper={bb:.2f if pd.notna(bb) else bb}")
 
     print(f"    {len(candidates)} stock(s) triggered BB breakout")
     print(f"    Taking top {len(to_buy)} (free slots = {free_slots})")
