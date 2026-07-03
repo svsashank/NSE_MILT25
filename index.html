@@ -317,8 +317,8 @@ let SB_URL = localStorage.getItem("milt25_sb_url") || "";
 let SB_KEY = localStorage.getItem("milt25_sb_key") || "";
 
 // Pre-fill from build-time embed (operator sets these in the HTML before deploy)
-const EMBED_URL = "REPLACE_SUPABASE_URL";
-const EMBED_KEY = "REPLACE_SUPABASE_KEY";
+const EMBED_URL = "https://ckvdwqzuklpvbpvqnmyu.supabase.co";
+const EMBED_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNrdmR3cXp1a2xwdmJwdnFubXl1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODExNjU3NTMsImV4cCI6MjA5Njc0MTc1M30.MQ4y1iUgMUwRBYNQrmndode-6T9o92AyJcQJsH8rkWo";
 if (!SB_URL && EMBED_URL !== "REPLACE_SUPABASE_URL") { SB_URL = EMBED_URL; }
 if (!SB_KEY && EMBED_KEY !== "REPLACE_SUPABASE_KEY") { SB_KEY = EMBED_KEY; }
 
