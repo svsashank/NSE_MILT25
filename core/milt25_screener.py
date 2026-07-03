@@ -2,49 +2,57 @@
 core/milt25_screener.py — MILT 25 live screener.
 
 Runs weekly (Friday EOD) to:
-  1. Fetch OHLCV for all NSE stocks with MCap > 1000 Cr
-  2. Compute BB(20, 3.7σ), MA23, ATR14 on weekly bars
-  3. Load open positions from Supabase
-  4. Check exit conditions for each open position
-  5. Check entry signals (weekly close > BB_upper)
-  6. Produce action list: sells + new buys
-  7. Update milt25_positions in Supabase
-  8. Write run summary to milt25_runs
+  1. Load base OHLCV history from the shared 'nse_full' Supabase Storage
+     bucket (maintained by NSE_1000Cr_Momentum's monthly refresh job) --
+     avoids re-fetching 2000+ tickers from yfinance every week.
+  2. Fetch only the DELTA (days since the last stored date) via a small
+     batched yfinance call, merge into the base history.
+  3. Compute BB(20, 3.7 sigma), MA23, ATR14 on weekly bars.
+  4. Load open positions from Supabase, check exit conditions.
+  5. Check entry signals (weekly close > BB_upper).
+  6. Write action list (buys + exits) to milt25_positions / milt25_runs.
 
 Weekly bars: daily OHLCV resampled to W-FRI.
 "Monday Open" execution is approximated as next trading day's close.
 """
 
-import os, json, time, requests
+import os
 from datetime import date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+import requests
+from supabase import create_client
+
+from core.data_fetcher import fetch_ohlcv
+from core.history_store import load_history, merge_history, raw_multiindex_to_fields
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SUPABASE_URL  = os.environ["SUPABASE_URL"]
-SUPABASE_KEY  = os.environ["SUPABASE_KEY"]
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]   # must be service_role for writes
 
 SHARES_JSON_URL = (
     "https://raw.githubusercontent.com/svsashank/NSE_1000Cr_Momentum"
     "/main/shares_outstanding.json"
 )
 
-MIN_MCAP_CR   = 1000      # Rs Cr
+HISTORY_UNIVERSE = "nse_full"   # shared Storage bucket key, maintained by NSE_1000Cr_Momentum
+
+MIN_MCAP_CR   = 1000
 MAX_POSITIONS = 25
-ALLOC_PCT     = 0.04      # 4% of current equity per new entry
-HARD_STOP_PCT = 0.20      # 20% below entry price
+ALLOC_PCT     = 0.04
+HARD_STOP_PCT = 0.20
 BB_PERIOD     = 20
 BB_STD        = 3.7
 EXIT_MA       = 23
 ATR_PERIOD    = 14
 ATR_MULT      = 1.8
 ROC_WEEKS     = 52
-LOOKBACK_DAYS = 520        # ~2 years of daily bars for weekly indicators
+
+BOOTSTRAP_LOOKBACK_DAYS = 750   # only used if no stored history exists at all
 
 
-# ── Supabase helpers ──────────────────────────────────────────────────────────
+# ── Supabase REST helpers (for milt25_positions / milt25_runs tables) ────────
 def sb_get(table, params=""):
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/{table}?{params}",
@@ -90,35 +98,39 @@ def load_shares():
     r = requests.get(SHARES_JSON_URL, timeout=30)
     r.raise_for_status()
     data = r.json()
-    return data.get("shares", data)  # handle both wrapped and flat formats
+    return data.get("shares", data)
 
 
-def fetch_universe_ohlcv(tickers, days=LOOKBACK_DAYS):
-    end   = date.today()
-    start = end - timedelta(days=days)
-    print(f"  Fetching OHLCV for {len(tickers)} tickers ({start} -> {end})...")
-    raw = yf.download(
-        tickers,
-        start=str(start),
-        end=str(end),
-        auto_adjust=True,
-        progress=False,
-        threads=True,
-    )
-    if isinstance(raw.columns, pd.MultiIndex):
-        close  = raw["Close"]
-        high   = raw["High"]
-        low    = raw["Low"]
+# ── History loading: base from Storage + small delta from yfinance ──────────
+def load_ohlcv(supabase, tickers):
+    print("  Loading base history from Supabase Storage ('nse_full')...")
+    existing = load_history(supabase, HISTORY_UNIVERSE)
+
+    if existing is None:
+        print("  No stored history found -- bootstrapping via direct fetch "
+              f"({BOOTSTRAP_LOOKBACK_DAYS} days). This is a one-time cost.")
+        raw, _ = fetch_ohlcv(tickers, lookback_days=BOOTSTRAP_LOOKBACK_DAYS,
+                              batch_size=50)
+        fields = raw_multiindex_to_fields(raw)
+        return fields["Close"], fields["High"], fields["Low"]
+
+    last_stored = existing["Close"].index[-1].date()
+    today = date.today()
+    gap_days = (today - last_stored).days
+    print(f"  Base history: {existing['Close'].shape[1]} tickers, "
+          f"up to {last_stored} ({gap_days} day(s) stale)")
+
+    if gap_days <= 0:
+        merged = existing
     else:
-        # Single ticker
-        close  = raw[["Close"]].rename(columns={"Close": tickers[0]})
-        high   = raw[["High"]].rename(columns={"High": tickers[0]})
-        low    = raw[["Low"]].rename(columns={"Low": tickers[0]})
-    # Forward-fill up to 3 days for thin tickers / circuit days
-    close = close.ffill(limit=3)
-    high  = high.ffill(limit=3)
-    low   = low.ffill(limit=3)
-    return close, high, low
+        print(f"  Fetching delta ({gap_days + 5} day lookback) for "
+              f"{len(tickers)} tickers...")
+        raw, _ = fetch_ohlcv(tickers, lookback_days=gap_days + 5, batch_size=50)
+        fresh = raw_multiindex_to_fields(raw)
+        merged = merge_history(existing, fresh)
+        print(f"  Merged history now runs to {merged['Close'].index[-1].date()}")
+
+    return merged["Close"], merged["High"], merged["Low"]
 
 
 # ── Weekly indicators ─────────────────────────────────────────────────────────
@@ -147,10 +159,12 @@ def weekly_indicators(close_d, high_d, low_d):
     return w_close, w_high, bb_upper, exit_sma, atr, roc_12m
 
 
-# ── Open positions from Supabase ──────────────────────────────────────────────
 def load_open_positions():
-    rows = sb_get("milt25_positions", "status=eq.open&select=*")
-    return rows  # list of dicts
+    return sb_get("milt25_positions", "status=eq.open&select=*")
+
+
+def fmt(x):
+    return f"{x:.2f}" if (x is not None and not (isinstance(x, float) and np.isnan(x))) else "N/A"
 
 
 # ── Main screener logic ───────────────────────────────────────────────────────
@@ -160,24 +174,24 @@ def run():
     print(f"MILT 25 Screener -- {today}")
     print(f"{'='*60}")
 
-    # 1. Load shares, compute eligible universe
-    print("\n[1] Loading universe...")
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+    print("\n[1] Loading universe (shares_outstanding.json)...")
     shares = load_shares()
     tickers = list(shares.keys())
-    print(f"    {len(tickers)} tickers in shares_outstanding")
+    print(f"    {len(tickers)} tickers")
 
-    # 2. Fetch OHLCV for all tickers
-    print("\n[2] Fetching OHLCV...")
-    close_d, high_d, low_d = fetch_universe_ohlcv(tickers)
+    print("\n[2] Loading OHLCV (Storage base + yfinance delta)...")
+    close_d, high_d, low_d = load_ohlcv(supabase, tickers)
 
-    # 3. Compute MCap filter -- shares x latest close
+    print("\n[3] Computing MCap filter...")
     latest_close = close_d.ffill().iloc[-1]
     mcap_cr = {}
     for t in tickers:
         sh = shares.get(t)
         px = latest_close.get(t, np.nan) if t in latest_close.index else np.nan
         if sh and pd.notna(px) and px > 0:
-            mcap_cr[t] = (sh * px) / 1e7  # yfinance NSE prices in Rs; /1e7 -> Cr
+            mcap_cr[t] = (sh * px) / 1e7
         else:
             mcap_cr[t] = None
 
@@ -185,42 +199,30 @@ def run():
                 if mcap_cr.get(t) and mcap_cr[t] >= MIN_MCAP_CR and t in close_d.columns]
     print(f"    {len(eligible)} tickers pass MCap >= Rs{MIN_MCAP_CR} Cr filter")
 
-    # 4. Compute weekly indicators for eligible universe only
-    print("\n[3] Computing weekly indicators...")
-    c_elig  = close_d[eligible]
-    h_elig  = high_d[eligible]
-    l_elig  = low_d[eligible]
+    print("\n[4] Computing weekly indicators...")
+    c_elig = close_d[eligible]
+    h_elig = high_d[eligible]
+    l_elig = low_d[eligible]
     w_close, w_high, bb_upper, exit_sma, atr, roc_12m = weekly_indicators(
         c_elig, h_elig, l_elig
     )
 
-    # Last completed weekly bar (most recent W-FRI <= today)
-    # Weekly index may be tz-aware (UTC) or tz-naive depending on yfinance version.
-    # Normalize: strip tz from index for comparison, then use the raw index value.
     w_idx = w_close.index
-    if w_idx.tz is not None:
-        w_idx_naive = w_idx.tz_convert("UTC").tz_localize(None)
-    else:
-        w_idx_naive = w_idx
-
+    w_idx_naive = w_idx.tz_convert("UTC").tz_localize(None) if w_idx.tz is not None else w_idx
     today_ts = pd.Timestamp(today)
-    # Include today if it is a Friday (the current week's bar)
     cutoff = today_ts + pd.Timedelta(days=1)
-    mask = w_idx_naive < cutoff
-    completed_weeks = w_idx[mask]
+    completed_weeks = w_idx[w_idx_naive < cutoff]
     if len(completed_weeks) == 0:
         print("No completed weekly bars -- exiting.")
         return
     last_friday = completed_weeks[-1]
-    print(f"    Signal week: {last_friday.date()}")
+    print(f"    Signal week: {last_friday}")
 
-    # 5. Load open positions
-    print("\n[4] Loading open positions...")
+    print("\n[5] Loading open positions...")
     open_positions = load_open_positions()
     print(f"    {len(open_positions)} open position(s)")
 
-    # 6. Update trailing stops and check exits
-    print("\n[5] Checking exits...")
+    print("\n[6] Checking exits...")
     exits = []
     positions_to_close = []
 
@@ -229,19 +231,18 @@ def run():
         if ticker not in w_close.columns:
             continue
 
-        # Update highest_high since entry
         entry_ts  = pd.Timestamp(pos["entry_date"])
         mask      = (w_high.index >= entry_ts) & (w_high.index <= last_friday)
         hh_series = w_high[ticker][mask].dropna()
-        new_hh    = float(hh_series.max()) if len(hh_series) > 0 else pos["highest_high"]
+        new_hh    = float(hh_series.max()) if len(hh_series) > 0 else float(pos["highest_high"])
         new_hh    = max(new_hh, float(pos["highest_high"]))
 
-        c   = float(w_close[ticker].get(last_friday, np.nan))
-        ma  = float(exit_sma[ticker].get(last_friday, np.nan))
-        a   = float(atr[ticker].get(last_friday, np.nan))
+        c  = float(w_close[ticker].get(last_friday, np.nan))
+        ma = float(exit_sma[ticker].get(last_friday, np.nan))
+        a  = float(atr[ticker].get(last_friday, np.nan))
 
-        hard_stop   = float(pos["entry_price"]) * (1 - HARD_STOP_PCT)
-        trail_stop  = (new_hh - ATR_MULT * a) if not np.isnan(a) else float("nan")
+        hard_stop  = float(pos["entry_price"]) * (1 - HARD_STOP_PCT)
+        trail_stop = (new_hh - ATR_MULT * a) if not np.isnan(a) else float("nan")
 
         reason = None
         if not np.isnan(c):
@@ -252,7 +253,6 @@ def run():
             elif not np.isnan(trail_stop) and c < trail_stop:
                 reason = "ATR_TRAIL"
 
-        # Always update highest_high + current stop levels in DB
         update_payload = {
             "highest_high": new_hh,
             "atr_trail_stop": None if np.isnan(trail_stop) else round(trail_stop, 2),
@@ -270,8 +270,7 @@ def run():
                 "exit_reason": reason,
             })
             exits.append({
-                "ticker": ticker,
-                "reason": reason,
+                "ticker": ticker, "reason": reason,
                 "entry_price": float(pos["entry_price"]),
                 "exit_price": round(exec_price, 2),
                 "entry_date": pos["entry_date"],
@@ -280,29 +279,24 @@ def run():
             positions_to_close.append(ticker)
             print(f"    EXIT  {ticker:20s}  {reason:12s}  @ Rs{exec_price:.2f}")
         else:
-            print(f"    HOLD  {ticker:20s}  close=Rs{c:.2f}  "
-                  f"hard_stop=Rs{hard_stop:.2f}  "
-                  f"trail=Rs{trail_stop:.2f if not np.isnan(trail_stop) else 0:.2f}")
+            print(f"    HOLD  {ticker:20s}  close=Rs{fmt(c)}  "
+                  f"hard_stop=Rs{fmt(hard_stop)}  trail=Rs{fmt(trail_stop)}")
 
         sb_patch("milt25_positions", f"ticker=eq.{ticker}&status=eq.open", update_payload)
 
-    # 7. Current portfolio state after exits
-    remaining_open = [p["ticker"] for p in open_positions
-                      if p["ticker"] not in positions_to_close]
+    remaining_open = [p["ticker"] for p in open_positions if p["ticker"] not in positions_to_close]
     free_slots = MAX_POSITIONS - len(remaining_open)
-    print(f"\n    Remaining positions after exits: {len(remaining_open)} / {MAX_POSITIONS}")
-    print(f"    Free slots: {free_slots}")
+    print(f"\n    Remaining positions: {len(remaining_open)} / {MAX_POSITIONS}  "
+          f"(free slots: {free_slots})")
 
-    # 8. Compute portfolio equity (mark-to-market)
     last_run = sb_get("milt25_runs", "order=triggered_at.desc&limit=1")
     if last_run:
         portfolio_equity = float(last_run[0].get("portfolio_equity") or 1_000_000)
         cash             = float(last_run[0].get("cash") or portfolio_equity)
     else:
-        portfolio_equity = 1_000_000   # Default Rs 10 lakh; operator sets actual capital
+        portfolio_equity = 1_000_000
         cash             = portfolio_equity
 
-    # Add back cash from exits
     for pos in open_positions:
         if pos["ticker"] in positions_to_close:
             ep   = next((e["exit_price"] for e in exits if e["ticker"] == pos["ticker"]),
@@ -310,8 +304,7 @@ def run():
             gain = ep / float(pos["entry_price"]) if float(pos["entry_price"]) else 1
             cash += float(pos["allocated_equity"]) * gain
 
-    # 9. Entry signals
-    print("\n[6] Scanning entry signals...")
+    print("\n[7] Scanning entry signals...")
     candidates = []
     for ticker in eligible:
         if ticker in remaining_open:
@@ -321,8 +314,7 @@ def run():
         if pd.notna(c) and pd.notna(bb) and c > bb:
             r = roc_12m[ticker].get(last_friday, np.nan)
             candidates.append({
-                "ticker": ticker,
-                "close": round(float(c), 2),
+                "ticker": ticker, "close": round(float(c), 2),
                 "bb_upper": round(float(bb), 2),
                 "roc_12m": round(float(r), 2) if pd.notna(r) else None,
                 "mcap_cr": round(mcap_cr.get(ticker, 0), 1),
@@ -330,19 +322,9 @@ def run():
 
     candidates.sort(key=lambda x: x["roc_12m"] or -1e9, reverse=True)
     to_buy = candidates[:free_slots]
+    print(f"    {len(candidates)} stock(s) triggered BB breakout; "
+          f"taking top {len(to_buy)} (free slots = {free_slots})")
 
-    # Debug: sample a few tickers to diagnose zero-signal runs
-    if len(candidates) == 0 and len(eligible) > 0:
-        sample = eligible[:5]
-        for t in sample:
-            c  = w_close[t].get(last_friday, np.nan) if t in w_close.columns else np.nan
-            bb = bb_upper[t].get(last_friday, np.nan) if t in bb_upper.columns else np.nan
-            print(f"    DEBUG {t}: close={c:.2f if pd.notna(c) else c}  bb_upper={bb:.2f if pd.notna(bb) else bb}")
-
-    print(f"    {len(candidates)} stock(s) triggered BB breakout")
-    print(f"    Taking top {len(to_buy)} (free slots = {free_slots})")
-
-    # 10. Execute buys -- write to milt25_positions
     new_entries = []
     for cand in to_buy:
         ticker     = cand["ticker"]
@@ -351,33 +333,20 @@ def run():
         shares_qty = int(alloc / exec_price) if exec_price > 0 else 0
         if shares_qty <= 0:
             continue
-        hard_stop  = round(exec_price * (1 - HARD_STOP_PCT), 2)
+        hard_stop = round(exec_price * (1 - HARD_STOP_PCT), 2)
 
-        pos_row = {
-            "ticker": ticker,
-            "entry_date": str(today),
-            "entry_price": exec_price,
-            "shares": shares_qty,
-            "allocated_equity": round(alloc, 2),
-            "hard_stop": hard_stop,
-            "highest_high": exec_price,
-            "atr_trail_stop": None,
-            "ma23_stop": None,
-            "current_price": exec_price,
-            "status": "open",
-        }
-        sb_post("milt25_positions", pos_row)
-        cash -= alloc
-        new_entries.append({
-            **cand,
-            "shares": shares_qty,
-            "allocated_equity": round(alloc, 2),
-            "hard_stop": hard_stop,
+        sb_post("milt25_positions", {
+            "ticker": ticker, "entry_date": str(today), "entry_price": exec_price,
+            "shares": shares_qty, "allocated_equity": round(alloc, 2),
+            "hard_stop": hard_stop, "highest_high": exec_price,
+            "atr_trail_stop": None, "ma23_stop": None,
+            "current_price": exec_price, "status": "open",
         })
-        print(f"    BUY   {ticker:20s}  @ Rs{exec_price:.2f}  "
-              f"qty={shares_qty}  alloc=Rs{alloc:,.0f}")
+        cash -= alloc
+        new_entries.append({**cand, "shares": shares_qty,
+                            "allocated_equity": round(alloc, 2), "hard_stop": hard_stop})
+        print(f"    BUY   {ticker:20s}  @ Rs{exec_price:.2f}  qty={shares_qty}  alloc=Rs{alloc:,.0f}")
 
-    # 11. Final portfolio equity mark-to-market
     all_open_after = remaining_open + [e["ticker"] for e in new_entries]
     holdings_value = 0.0
     for pos in open_positions:
@@ -385,38 +354,25 @@ def run():
         if t in positions_to_close:
             continue
         c = w_close[t].get(last_friday, np.nan) if t in w_close.columns else np.nan
-        pv = float(pos["shares"]) * (float(c) if pd.notna(c) else float(pos["entry_price"]))
-        holdings_value += pv
+        holdings_value += float(pos["shares"]) * (float(c) if pd.notna(c) else float(pos["entry_price"]))
     for entry in new_entries:
         holdings_value += entry["shares"] * entry["close"]
 
     portfolio_equity_final = cash + holdings_value
 
-    # 12. Write run summary
-    print("\n[7] Writing run summary...")
-    run_row = {
-        "run_date": str(today),
-        "signal_week": str(last_friday.date()),
-        "portfolio_equity": round(portfolio_equity_final, 2),
-        "cash": round(cash, 2),
-        "open_positions": len(all_open_after),
-        "new_entries": new_entries,
-        "exits": exits,
-        "signals": candidates,
-        "eligible_universe": len(eligible),
-        "status": "completed",
-        "triggered_at": datetime.utcnow().isoformat(),
-    }
-    sb_post("milt25_runs", run_row)
+    print("\n[8] Writing run summary...")
+    sb_post("milt25_runs", {
+        "run_date": str(today), "signal_week": str(last_friday.date()),
+        "portfolio_equity": round(portfolio_equity_final, 2), "cash": round(cash, 2),
+        "open_positions": len(all_open_after), "new_entries": new_entries,
+        "exits": exits, "signals": candidates, "eligible_universe": len(eligible),
+        "status": "completed", "triggered_at": datetime.utcnow().isoformat(),
+    })
 
     print(f"\n{'='*60}")
-    print(f"  Run complete.")
-    print(f"  Signal week : {last_friday.date()}")
-    print(f"  Open        : {len(all_open_after)} / {MAX_POSITIONS}")
-    print(f"  New buys    : {len(new_entries)}")
-    print(f"  Exits       : {len(exits)}")
-    print(f"  Portfolio Rs: {portfolio_equity_final:,.2f}")
-    print(f"  Cash Rs     : {cash:,.2f}")
+    print(f"  Run complete. Signal week: {last_friday.date()}")
+    print(f"  Open: {len(all_open_after)}/{MAX_POSITIONS}  Buys: {len(new_entries)}  Exits: {len(exits)}")
+    print(f"  Portfolio Rs: {portfolio_equity_final:,.2f}   Cash Rs: {cash:,.2f}")
     print(f"{'='*60}\n")
 
 
