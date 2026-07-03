@@ -304,26 +304,47 @@ def run():
             gain = ep / float(pos["entry_price"]) if float(pos["entry_price"]) else 1
             cash += float(pos["allocated_equity"]) * gain
 
-    print("\n[7] Scanning entry signals...")
+    print("\n[7] Building full universe snapshot + scanning entry signals...")
+    universe_snapshot = []
     candidates = []
     for ticker in eligible:
-        if ticker in remaining_open:
-            continue
-        c  = w_close[ticker].get(last_friday, np.nan)
-        bb = bb_upper[ticker].get(last_friday, np.nan)
-        if pd.notna(c) and pd.notna(bb) and c > bb:
-            r = roc_12m[ticker].get(last_friday, np.nan)
+        c   = w_close[ticker].get(last_friday, np.nan)
+        bb  = bb_upper[ticker].get(last_friday, np.nan)
+        ma  = exit_sma[ticker].get(last_friday, np.nan)
+        a   = atr[ticker].get(last_friday, np.nan)
+        r   = roc_12m[ticker].get(last_friday, np.nan)
+
+        breakout = bool(pd.notna(c) and pd.notna(bb) and c > bb)
+        dist_pct = (float(c - bb) / float(bb) * 100) if (pd.notna(c) and pd.notna(bb) and bb) else None
+
+        row = {
+            "ticker": ticker,
+            "close": round(float(c), 2) if pd.notna(c) else None,
+            "bb_upper": round(float(bb), 2) if pd.notna(bb) else None,
+            "ma23": round(float(ma), 2) if pd.notna(ma) else None,
+            "atr14": round(float(a), 2) if pd.notna(a) else None,
+            "roc_12m": round(float(r), 2) if pd.notna(r) else None,
+            "mcap_cr": round(mcap_cr.get(ticker, 0), 1),
+            "dist_to_bb_pct": round(dist_pct, 2) if dist_pct is not None else None,
+            "breakout": breakout,
+            "held": ticker in remaining_open,
+        }
+        universe_snapshot.append(row)
+
+        if breakout and ticker not in remaining_open:
             candidates.append({
-                "ticker": ticker, "close": round(float(c), 2),
-                "bb_upper": round(float(bb), 2),
-                "roc_12m": round(float(r), 2) if pd.notna(r) else None,
-                "mcap_cr": round(mcap_cr.get(ticker, 0), 1),
+                "ticker": ticker, "close": row["close"], "bb_upper": row["bb_upper"],
+                "roc_12m": row["roc_12m"], "mcap_cr": row["mcap_cr"],
             })
+
+    # Sort universe by ROC 12M desc for a sensible default frontend view
+    universe_snapshot.sort(key=lambda x: x["roc_12m"] if x["roc_12m"] is not None else -1e9, reverse=True)
 
     candidates.sort(key=lambda x: x["roc_12m"] or -1e9, reverse=True)
     to_buy = candidates[:free_slots]
     print(f"    {len(candidates)} stock(s) triggered BB breakout; "
           f"taking top {len(to_buy)} (free slots = {free_slots})")
+    print(f"    Full universe snapshot: {len(universe_snapshot)} tickers")
 
     new_entries = []
     for cand in to_buy:
@@ -366,6 +387,7 @@ def run():
         "portfolio_equity": round(portfolio_equity_final, 2), "cash": round(cash, 2),
         "open_positions": len(all_open_after), "new_entries": new_entries,
         "exits": exits, "signals": candidates, "eligible_universe": len(eligible),
+        "universe": universe_snapshot,
         "status": "completed", "triggered_at": datetime.utcnow().isoformat(),
     })
 
