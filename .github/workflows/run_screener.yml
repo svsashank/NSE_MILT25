@@ -1,0 +1,36 @@
+name: MILT 25 Weekly Screener
+
+on:
+  schedule:
+    # Every Friday at 17:00 IST = 11:30 UTC (NSE closes 15:30 IST)
+    - cron: "30 11 * * 5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (print signals but do not write to Supabase)"
+        required: false
+        default: "false"
+
+jobs:
+  run-screener:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install yfinance pandas numpy requests
+
+      - name: Run MILT 25 screener
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: python -m core.milt25_screener
