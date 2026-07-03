@@ -217,6 +217,19 @@
     border-left: 3px solid var(--blue);
   }
   .config-note code { font-family: monospace; color: var(--text); font-size: 11px; }
+
+  .param-label { display: block; font-size: 10px; color: var(--muted); margin-bottom: 3px; text-transform: uppercase; letter-spacing: .3px; }
+  .param-input {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 5px; padding: 6px 8px; font-size: 12px; outline: none;
+  }
+  .param-input:focus { border-color: var(--blue); }
+  .config-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .config-pill {
+    font-size: 11px; padding: 3px 9px; border-radius: 12px;
+    background: var(--pill-bg); color: var(--muted); border: 1px solid var(--border);
+    font-family: monospace;
+  }
 </style>
 </head>
 <body>
@@ -233,6 +246,7 @@
     <button id="patToggle" onclick="togglePat()"
       style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;
       padding:6px 10px;font-size:11px;cursor:pointer">show</button>
+    <button onclick="toggleParamsPanel()" class="btn" style="background:var(--surface2);border:1px solid var(--border)">⚙ Parameters</button>
     <button id="runBtn" onclick="triggerRun()" class="btn">
       <span id="runBtnLabel">▶ Run Screen</span>
     </button>
@@ -241,6 +255,28 @@
 </header>
 <div class="run-status" id="runStatus" style="padding:6px 24px;font-size:12px;color:var(--muted);
   background:var(--surface);border-bottom:1px solid var(--border)"></div>
+
+<div id="paramsPanel" style="background:var(--surface);border-bottom:1px solid var(--border);padding:14px 24px;display:none">
+  <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">
+    Strategy Parameters (this run only — does not change stored open positions)
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;max-width:1000px">
+    <div><label class="param-label">Min MCap (Cr)</label><input type="number" id="p_min_mcap" value="1000" class="param-input"></div>
+    <div><label class="param-label">Max Positions</label><input type="number" id="p_max_positions" value="25" class="param-input"></div>
+    <div><label class="param-label">Alloc % / trade</label><input type="number" step="0.01" id="p_alloc_pct" value="0.04" class="param-input"></div>
+    <div><label class="param-label">Hard Stop %</label><input type="number" step="0.01" id="p_hard_stop_pct" value="0.20" class="param-input"></div>
+    <div><label class="param-label">BB Period (wk)</label><input type="number" id="p_bb_period" value="20" class="param-input"></div>
+    <div><label class="param-label">BB Std Dev</label><input type="number" step="0.1" id="p_bb_std" value="3.7" class="param-input"></div>
+    <div><label class="param-label">Exit MA Period</label><input type="number" id="p_exit_ma_period" value="23" class="param-input"></div>
+    <div><label class="param-label">ATR Period</label><input type="number" id="p_atr_period" value="14" class="param-input"></div>
+    <div><label class="param-label">ATR Multiplier</label><input type="number" step="0.1" id="p_atr_multiplier" value="1.8" class="param-input"></div>
+    <div><label class="param-label">ROC Period (wk)</label><input type="number" id="p_roc_period_weeks" value="52" class="param-input"></div>
+  </div>
+  <div style="font-size:11px;color:var(--muted);margin-top:10px">
+    Lower BB Std Dev → more (less extreme) breakout signals. 3.7σ is intentionally very strict —
+    try 2.5–3.0 to see more candidates while testing.
+  </div>
+</div>
 
 <nav>
   <button class="active" onclick="showTab('actions',this)">This Week</button>
@@ -292,11 +328,19 @@
   <!-- ── Full Universe ── -->
   <div id="tab-universe" class="tab-panel">
     <div class="stats" id="universeStats"></div>
+    <div class="config-note" style="margin-bottom:16px">
+      A Bollinger breakout at 3.7 standard deviations is an intentionally rare, extreme event —
+      statistically only a tiny fraction of weeks should show any qualifying stock at all, even
+      across 900+ tickers. Zero signals most weeks is expected, not a bug. This table is sorted by
+      <strong>distance to the BB upper band</strong> (closest to triggering first) so you can see how
+      close the nearest candidates are, even when nothing has broken out yet. Positive % = already
+      broken out; negative % = still below the band by that much.
+    </div>
     <div class="search-row">
       <input id="uniSearch" type="text" placeholder="Filter by ticker…" oninput="renderUniverse()">
     </div>
     <div class="table-wrap">
-      <div class="table-title">Full Eligible Universe — indicators as of signal week (sorted by ROC 12M)</div>
+      <div class="table-title">Full Eligible Universe — sorted by distance to BB upper band (closest first)</div>
       <div id="universeTable"></div>
     </div>
   </div>
@@ -371,6 +415,26 @@ function togglePat() {
   else { inp.type = "password"; btn.textContent = "show"; }
 }
 
+function toggleParamsPanel() {
+  const panel = document.getElementById("paramsPanel");
+  panel.style.display = panel.style.display === "none" ? "block" : "none";
+}
+
+function gatherParams() {
+  return {
+    min_mcap:         Number(document.getElementById("p_min_mcap").value) || undefined,
+    max_positions:    Number(document.getElementById("p_max_positions").value) || undefined,
+    alloc_pct:        Number(document.getElementById("p_alloc_pct").value) || undefined,
+    hard_stop_pct:    Number(document.getElementById("p_hard_stop_pct").value) || undefined,
+    bb_period:        Number(document.getElementById("p_bb_period").value) || undefined,
+    bb_std:           Number(document.getElementById("p_bb_std").value) || undefined,
+    exit_ma_period:   Number(document.getElementById("p_exit_ma_period").value) || undefined,
+    atr_period:       Number(document.getElementById("p_atr_period").value) || undefined,
+    atr_multiplier:   Number(document.getElementById("p_atr_multiplier").value) || undefined,
+    roc_period_weeks: Number(document.getElementById("p_roc_period_weeks").value) || undefined,
+  };
+}
+
 function setRunStatus(msg, cls) {
   const el = document.getElementById("runStatus");
   el.textContent = msg;
@@ -412,7 +476,10 @@ async function triggerRun() {
           "Accept": "application/vnd.github.v3+json",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ event_type: "run_milt25_screen" }),
+        body: JSON.stringify({
+          event_type: "run_milt25_screen",
+          client_payload: { params: JSON.stringify(gatherParams()) },
+        }),
       }
     );
     if (r.status !== 204) {
@@ -527,6 +594,31 @@ function renderMeta() {
   const ts = new Date(latestRun.triggered_at);
   document.getElementById("runMeta").textContent =
     `Last run: ${ts.toLocaleDateString("en-IN")} ${ts.toLocaleTimeString("en-IN", {hour:"2-digit",minute:"2-digit"})}  ·  Signal week: ${latestRun.signal_week}`;
+
+  // Pre-fill param inputs with the config actually used on the last run,
+  // and show them as pills so it's clear what produced these results.
+  const cfg = latestRun.config_used;
+  if (cfg) {
+    const map = {
+      min_mcap: "p_min_mcap", max_positions: "p_max_positions", alloc_pct: "p_alloc_pct",
+      hard_stop_pct: "p_hard_stop_pct", bb_period: "p_bb_period", bb_std: "p_bb_std",
+      exit_ma_period: "p_exit_ma_period", atr_period: "p_atr_period",
+      atr_multiplier: "p_atr_multiplier", roc_period_weeks: "p_roc_period_weeks",
+    };
+    for (const [key, id] of Object.entries(map)) {
+      const el = document.getElementById(id);
+      if (el && cfg[key] !== undefined) el.value = cfg[key];
+    }
+    const pillsHtml = Object.entries(cfg).map(([k,v]) => `<span class="config-pill">${k}=${v}</span>`).join("");
+    let pillsEl = document.getElementById("configPills");
+    if (!pillsEl) {
+      pillsEl = document.createElement("div");
+      pillsEl.id = "configPills";
+      pillsEl.className = "config-pills";
+      document.getElementById("runMeta").after(pillsEl);
+    }
+    pillsEl.innerHTML = pillsHtml;
+  }
 }
 
 function renderStats() {
@@ -713,6 +805,8 @@ function renderUniverse() {
   }
 
   const q = (document.getElementById("uniSearch")?.value || "").toUpperCase();
+  // Backend already sorts by dist_to_bb_pct descending (closest to breakout first);
+  // just filter here, don't re-sort.
   const filtered = q ? raw.filter(r => r.ticker.includes(q)) : raw;
 
   if (!filtered.length) {
@@ -723,7 +817,7 @@ function renderUniverse() {
   el.innerHTML = `<table>
     <thead><tr>
       <th>#</th><th>Ticker</th><th class="r">Close</th><th class="r">BB Upper</th>
-      <th class="r">Dist to BB</th><th class="r">MA23</th><th class="r">ATR14</th>
+      <th class="r">Dist to BB (closest first)</th><th class="r">MA23</th><th class="r">ATR14</th>
       <th class="r">ROC 12M</th><th class="r">MCap (Cr)</th><th>Status</th>
     </tr></thead><tbody>
     ${filtered.map((r, i) => {
