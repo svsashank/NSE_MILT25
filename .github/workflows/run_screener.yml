@@ -9,6 +9,8 @@ on:
         description: "Dry run (print signals but do not write to Supabase)"
         required: false
         default: "false"
+  repository_dispatch:
+    types: [run_milt25_screen]
 
 jobs:
   run-screener:
