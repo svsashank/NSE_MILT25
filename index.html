@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MILT 25 Screener</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --green: #3fb950;
+    --red: #f85149;
+    --amber: #d29922;
+    --blue: #388bfd;
+    --teal: #39d353;
+    --pill-bg: #21262d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; }
+  header h1 span { color: var(--blue); }
+  .run-meta { font-size: 12px; color: var(--muted); }
+
+  /* ── Nav tabs ── */
+  nav {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    display: flex;
+    gap: 4px;
+  }
+  nav button {
+    background: none; border: none; color: var(--muted);
+    padding: 10px 14px; cursor: pointer; font-size: 13px;
+    border-bottom: 2px solid transparent;
+    transition: color .15s, border-color .15s;
+  }
+  nav button.active { color: var(--text); border-color: var(--blue); }
+  nav button:hover:not(.active) { color: var(--text); }
+
+  /* ── Main ── */
+  main { padding: 20px 24px; max-width: 1200px; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ── Stats row ── */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .stat-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .stat-card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .stat-card .value.green { color: var(--green); }
+  .stat-card .value.red   { color: var(--red); }
+  .stat-card .value.amber { color: var(--amber); }
+  .stat-card .value.blue  { color: var(--blue); }
+
+  /* ── Action banner ── */
+  .action-banner {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 24px;
+  }
+  .action-banner h2 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 12px; }
+  .action-list { display: flex; flex-wrap: wrap; gap: 8px; }
+  .action-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 12px; border-radius: 20px;
+    font-size: 12px; font-weight: 600; letter-spacing: .3px;
+  }
+  .action-pill.buy  { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid rgba(63,185,80,.3); }
+  .action-pill.sell { background: rgba(248,81,73,.15);  color: var(--red);   border: 1px solid rgba(248,81,73,.3); }
+  .action-pill.none { background: var(--pill-bg); color: var(--muted); border: 1px solid var(--border); font-weight: 400; }
+
+  /* ── Tables ── */
+  .table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 20px;
+  }
+  .table-title {
+    padding: 12px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface2);
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left;
+    padding: 9px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+  th.r { text-align: right; }
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  td.r { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  .ticker-cell { font-weight: 600; font-family: monospace; font-size: 13px; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge.buy   { background: rgba(63,185,80,.15); color: var(--green); }
+  .badge.sell  { background: rgba(248,81,73,.15);  color: var(--red);  }
+  .badge.hold  { background: rgba(56,139,253,.12); color: var(--blue); }
+  .badge.stop  { background: rgba(210,153,34,.15); color: var(--amber); }
+
+  .pnl.pos { color: var(--green); }
+  .pnl.neg { color: var(--red); }
+
+  /* stop proximity bar */
+  .stop-bar { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+  .bar-track { width: 60px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .bar-fill  { height: 100%; border-radius: 2px; }
+
+  /* ── Chart ── */
+  .chart-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .chart-wrap h2 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 16px; }
+
+  /* ── Empty / loading ── */
+  .empty { padding: 32px; text-align: center; color: var(--muted); }
+  .loading { color: var(--muted); padding: 40px; text-align: center; font-size: 13px; }
+
+  /* ── Signals table search ── */
+  .search-row {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
+  }
+  .search-row input {
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; padding: 7px 12px;
+    font-size: 13px; outline: none; flex: 1;
+  }
+  .search-row input:focus { border-color: var(--blue); }
+
+  /* ── Settings form ── */
+  .settings-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    max-width: 480px;
+  }
+  .settings-card h2 { font-size: 14px; font-weight: 600; margin-bottom: 20px; }
+  .form-row { margin-bottom: 16px; }
+  .form-row label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .form-row input {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; padding: 8px 12px;
+    font-size: 13px; outline: none;
+  }
+  .form-row input:focus { border-color: var(--blue); }
+  .btn {
+    background: var(--blue); color: #fff; border: none;
+    border-radius: 6px; padding: 9px 18px; cursor: pointer;
+    font-size: 13px; font-weight: 600;
+  }
+  .btn:hover { opacity: .88; }
+  .config-note {
+    font-size: 12px; color: var(--muted); margin-top: 12px;
+    background: var(--surface2); border-radius: 6px; padding: 10px 12px;
+    border-left: 3px solid var(--blue);
+  }
+  .config-note code { font-family: monospace; color: var(--text); font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>MILT <span>25</span> Screener</h1>
+    <div class="run-meta" id="runMeta">Loading…</div>
+  </div>
+  <button class="btn" onclick="loadData()">↻ Refresh</button>
+</header>
+
+<nav>
+  <button class="active" onclick="showTab('actions',this)">This Week</button>
+  <button onclick="showTab('portfolio',this)">Portfolio</button>
+  <button onclick="showTab('signals',this)">All Signals</button>
+  <button onclick="showTab('history',this)">History</button>
+  <button onclick="showTab('settings',this)">Settings</button>
+</nav>
+
+<main>
+
+  <!-- ── This Week ── -->
+  <div id="tab-actions" class="tab-panel active">
+    <div class="stats" id="statsRow"></div>
+    <div class="action-banner">
+      <h2>Actions for Monday Open</h2>
+      <div class="action-list" id="actionList"><span class="empty">Loading…</span></div>
+    </div>
+    <div class="table-wrap">
+      <div class="table-title">New Buys this week</div>
+      <div id="buysTable"></div>
+    </div>
+    <div class="table-wrap">
+      <div class="table-title">Exits this week</div>
+      <div id="exitsTable"></div>
+    </div>
+  </div>
+
+  <!-- ── Portfolio ── -->
+  <div id="tab-portfolio" class="tab-panel">
+    <div class="table-wrap">
+      <div class="table-title">Open Positions</div>
+      <div id="portfolioTable"></div>
+    </div>
+  </div>
+
+  <!-- ── All Signals ── -->
+  <div id="tab-signals" class="tab-panel">
+    <div class="search-row">
+      <input id="sigSearch" type="text" placeholder="Filter by ticker…" oninput="renderSignals()">
+    </div>
+    <div class="table-wrap">
+      <div class="table-title">BB Breakout Signals — this week (sorted by ROC 12M)</div>
+      <div id="signalsTable"></div>
+    </div>
+  </div>
+
+  <!-- ── History ── -->
+  <div id="tab-history" class="tab-panel">
+    <div class="chart-wrap">
+      <h2>Portfolio Equity (all runs)</h2>
+      <canvas id="equityChart" height="220"></canvas>
+    </div>
+    <div class="table-wrap">
+      <div class="table-title">Run History</div>
+      <div id="historyTable"></div>
+    </div>
+  </div>
+
+  <!-- ── Settings ── -->
+  <div id="tab-settings" class="tab-panel">
+    <div class="settings-card">
+      <h2>Supabase Connection</h2>
+      <div class="form-row">
+        <label>Supabase URL</label>
+        <input id="cfgUrl" type="text" placeholder="https://xxxx.supabase.co">
+      </div>
+      <div class="form-row">
+        <label>Supabase Anon Key</label>
+        <input id="cfgKey" type="text" placeholder="eyJ…">
+      </div>
+      <button class="btn" onclick="saveConfig()">Save & Reload</button>
+      <div class="config-note">
+        Saved to <code>localStorage</code> in your browser only.
+        Use the Supabase <strong>anon</strong> key (public read-only access is fine).
+        RLS policies should allow SELECT on <code>milt25_runs</code> and
+        <code>milt25_positions</code> for <code>anon</code> role.
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ── Config ───────────────────────────────────────────────────────────────────
+let SB_URL = localStorage.getItem("milt25_sb_url") || "";
+let SB_KEY = localStorage.getItem("milt25_sb_key") || "";
+
+// Pre-fill from build-time embed (operator sets these in the HTML before deploy)
+const EMBED_URL = "REPLACE_SUPABASE_URL";
+const EMBED_KEY = "REPLACE_SUPABASE_KEY";
+if (!SB_URL && EMBED_URL !== "REPLACE_SUPABASE_URL") { SB_URL = EMBED_URL; }
+if (!SB_KEY && EMBED_KEY !== "REPLACE_SUPABASE_KEY") { SB_KEY = EMBED_KEY; }
+
+function saveConfig() {
+  SB_URL = document.getElementById("cfgUrl").value.trim();
+  SB_KEY = document.getElementById("cfgKey").value.trim();
+  localStorage.setItem("milt25_sb_url", SB_URL);
+  localStorage.setItem("milt25_sb_key", SB_KEY);
+  loadData();
+}
+
+// Pre-fill settings inputs
+document.getElementById("cfgUrl").value = SB_URL;
+document.getElementById("cfgKey").value = SB_KEY;
+
+// ── Tab nav ───────────────────────────────────────────────────────────────────
+function showTab(name, btn) {
+  document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+  document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
+  document.getElementById("tab-" + name).classList.add("active");
+  btn.classList.add("active");
+}
+
+// ── Supabase fetch ────────────────────────────────────────────────────────────
+async function sbGet(table, params = "") {
+  if (!SB_URL || !SB_KEY) return null;
+  const r = await fetch(`${SB_URL}/rest/v1/${table}?${params}`, {
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+  });
+  if (!r.ok) throw new Error(`Supabase ${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let latestRun = null;
+let openPositions = [];
+let allRuns = [];
+
+// ── Load ──────────────────────────────────────────────────────────────────────
+async function loadData() {
+  if (!SB_URL || !SB_KEY) {
+    document.getElementById("runMeta").textContent = "⚠ Set Supabase credentials in Settings";
+    return;
+  }
+  try {
+    [latestRun, openPositions, allRuns] = await Promise.all([
+      sbGet("milt25_runs", "order=triggered_at.desc&limit=1").then(r => r?.[0] || null),
+      sbGet("milt25_positions", "status=eq.open&order=entry_date.desc&select=*"),
+      sbGet("milt25_runs", "order=triggered_at.asc&select=run_date,signal_week,portfolio_equity,cash,open_positions,new_entries,exits,signals,eligible_universe,status,triggered_at"),
+    ]);
+    render();
+  } catch(e) {
+    document.getElementById("runMeta").textContent = "Error: " + e.message;
+    console.error(e);
+  }
+}
+
+// ── Render all ────────────────────────────────────────────────────────────────
+function render() {
+  renderMeta();
+  renderStats();
+  renderActions();
+  renderBuys();
+  renderExits();
+  renderPortfolio();
+  renderSignals();
+  renderHistory();
+}
+
+function fmtRs(n) {
+  if (n == null || isNaN(n)) return "—";
+  return "₹" + Number(n).toLocaleString("en-IN", {maximumFractionDigits: 2});
+}
+function fmtPct(n) {
+  if (n == null || isNaN(n)) return "—";
+  const v = Number(n).toFixed(1);
+  return (n >= 0 ? "+" : "") + v + "%";
+}
+function pnlClass(n) { return n >= 0 ? "pnl pos" : "pnl neg"; }
+
+function renderMeta() {
+  if (!latestRun) { document.getElementById("runMeta").textContent = "No runs yet"; return; }
+  const ts = new Date(latestRun.triggered_at);
+  document.getElementById("runMeta").textContent =
+    `Last run: ${ts.toLocaleDateString("en-IN")} ${ts.toLocaleTimeString("en-IN", {hour:"2-digit",minute:"2-digit"})}  ·  Signal week: ${latestRun.signal_week}`;
+}
+
+function renderStats() {
+  if (!latestRun) { document.getElementById("statsRow").innerHTML = ""; return; }
+  const buys  = (latestRun.new_entries || []).length;
+  const sells = (latestRun.exits || []).length;
+  const eq    = latestRun.portfolio_equity;
+  const cash  = latestRun.cash;
+  const invested = eq && cash ? eq - cash : null;
+  const cashPct  = eq ? (cash / eq * 100) : null;
+
+  document.getElementById("statsRow").innerHTML = `
+    <div class="stat-card"><div class="label">Portfolio Value</div><div class="value blue">${fmtRs(eq)}</div></div>
+    <div class="stat-card"><div class="label">Cash</div><div class="value">${fmtRs(cash)}<small style="font-size:12px;color:var(--muted);margin-left:4px">${cashPct ? cashPct.toFixed(0)+"%" : ""}</small></div></div>
+    <div class="stat-card"><div class="label">Open Positions</div><div class="value">${latestRun.open_positions} <small style="font-size:13px;color:var(--muted)">/ 25</small></div></div>
+    <div class="stat-card"><div class="label">This Week Buys</div><div class="value green">${buys}</div></div>
+    <div class="stat-card"><div class="label">This Week Exits</div><div class="value red">${sells}</div></div>
+    <div class="stat-card"><div class="label">Universe Eligible</div><div class="value">${latestRun.eligible_universe || "—"}</div></div>
+  `;
+}
+
+function renderActions() {
+  const el = document.getElementById("actionList");
+  if (!latestRun) { el.innerHTML = '<span class="action-pill none">No data</span>'; return; }
+  const buys  = latestRun.new_entries || [];
+  const exits = latestRun.exits || [];
+  if (!buys.length && !exits.length) {
+    el.innerHTML = '<span class="action-pill none">No actions this week — hold all positions</span>';
+    return;
+  }
+  let html = "";
+  exits.forEach(e => {
+    const label = e.reason === "STOP_LOSS" ? "🛑 SELL" : e.reason === "MA_EXIT" ? "📉 SELL" : "⚡ SELL";
+    html += `<span class="action-pill sell">${label} ${e.ticker.replace(".NS","")}</span>`;
+  });
+  buys.forEach(b => {
+    html += `<span class="action-pill buy">✓ BUY ${b.ticker.replace(".NS","")}</span>`;
+  });
+  el.innerHTML = html;
+}
+
+function renderBuys() {
+  const el = document.getElementById("buysTable");
+  const buys = latestRun?.new_entries || [];
+  if (!buys.length) { el.innerHTML = '<div class="empty">No new buys this week</div>'; return; }
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>Ticker</th><th class="r">Entry Price</th><th class="r">Qty</th>
+      <th class="r">Allocated</th><th class="r">Hard Stop</th><th class="r">MCap (Cr)</th><th class="r">ROC 12M</th>
+    </tr></thead><tbody>
+    ${buys.map(b => `<tr>
+      <td class="ticker-cell">${b.ticker.replace(".NS","")}</td>
+      <td class="r">${fmtRs(b.close)}</td>
+      <td class="r">${b.shares}</td>
+      <td class="r">${fmtRs(b.allocated_equity)}</td>
+      <td class="r" style="color:var(--red)">${fmtRs(b.hard_stop)}</td>
+      <td class="r">${b.mcap_cr ? Number(b.mcap_cr).toLocaleString("en-IN") : "—"}</td>
+      <td class="r ${b.roc_12m >= 0 ? "pnl pos" : "pnl neg"}">${fmtPct(b.roc_12m)}</td>
+    </tr>`).join("")}
+    </tbody></table>`;
+}
+
+function renderExits() {
+  const el = document.getElementById("exitsTable");
+  const exits = latestRun?.exits || [];
+  if (!exits.length) { el.innerHTML = '<div class="empty">No exits this week</div>'; return; }
+  const reasonBadge = r => {
+    if (r === "STOP_LOSS") return `<span class="badge stop">Hard Stop</span>`;
+    if (r === "MA_EXIT")   return `<span class="badge sell">MA23</span>`;
+    return `<span class="badge stop">ATR Trail</span>`;
+  };
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>Ticker</th><th>Reason</th><th class="r">Entry</th>
+      <th class="r">Exit</th><th class="r">P&L</th><th>Held Since</th>
+    </tr></thead><tbody>
+    ${exits.map(e => {
+      const pnl = ((e.exit_price - e.entry_price) / e.entry_price * 100);
+      return `<tr>
+        <td class="ticker-cell">${e.ticker.replace(".NS","")}</td>
+        <td>${reasonBadge(e.reason)}</td>
+        <td class="r">${fmtRs(e.entry_price)}</td>
+        <td class="r">${fmtRs(e.exit_price)}</td>
+        <td class="r ${pnlClass(pnl)}">${fmtPct(pnl)}</td>
+        <td>${e.entry_date || "—"}</td>
+      </tr>`;
+    }).join("")}
+    </tbody></table>`;
+}
+
+function renderPortfolio() {
+  const el = document.getElementById("portfolioTable");
+  if (!openPositions.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
+
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>Ticker</th><th class="r">Entry</th><th class="r">Current</th>
+      <th class="r">P&L</th><th class="r">Hard Stop</th>
+      <th class="r">MA23 Stop</th><th class="r">ATR Trail</th>
+      <th class="r">Shares</th><th>Since</th>
+    </tr></thead><tbody>
+    ${openPositions.map(p => {
+      const curr = p.current_price;
+      const pnlPct = curr ? (curr - p.entry_price) / p.entry_price * 100 : null;
+
+      // Which stop is closest — % distance from current
+      const stops = [
+        { name: "Hard", val: p.hard_stop },
+        { name: "MA23", val: p.ma23_stop },
+        { name: "ATR",  val: p.atr_trail_stop },
+      ].filter(s => s.val && curr);
+
+      // Bar: how far current is above nearest stop (0–25% range shown)
+      const nearestStop = stops.length ? Math.max(...stops.map(s => s.val)) : null;
+      const distPct = (nearestStop && curr) ? ((curr - nearestStop) / curr * 100) : null;
+      const barWidth = distPct ? Math.min(100, Math.max(0, distPct / 25 * 100)) : 0;
+      const barColor = distPct < 5 ? "var(--red)" : distPct < 12 ? "var(--amber)" : "var(--green)";
+
+      return `<tr>
+        <td class="ticker-cell">${p.ticker.replace(".NS","")}</td>
+        <td class="r">${fmtRs(p.entry_price)}</td>
+        <td class="r">${curr ? fmtRs(curr) : "—"}</td>
+        <td class="r ${pnlPct != null ? pnlClass(pnlPct) : ""}">${pnlPct != null ? fmtPct(pnlPct) : "—"}</td>
+        <td class="r" style="color:var(--red)">${fmtRs(p.hard_stop)}</td>
+        <td class="r" style="color:var(--amber)">${p.ma23_stop ? fmtRs(p.ma23_stop) : "—"}</td>
+        <td class="r" style="color:var(--amber)">${p.atr_trail_stop ? fmtRs(p.atr_trail_stop) : "—"}</td>
+        <td class="r">${p.shares}</td>
+        <td>${p.entry_date || "—"}</td>
+      </tr>`;
+    }).join("")}
+    </tbody></table>`;
+}
+
+let allSignals = [];
+function renderSignals() {
+  const el = document.getElementById("signalsTable");
+  const raw = latestRun?.signals || [];
+  const q = (document.getElementById("sigSearch")?.value || "").toUpperCase();
+  const filtered = q ? raw.filter(s => s.ticker.includes(q)) : raw;
+  allSignals = raw;
+
+  if (!filtered.length) { el.innerHTML = `<div class="empty">No BB breakout signals this week${q ? " matching filter" : ""}</div>`; return; }
+
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>Ticker</th><th class="r">Close</th><th class="r">BB Upper</th>
+      <th class="r">Break%</th><th class="r">ROC 12M</th><th class="r">MCap (Cr)</th><th>Action</th>
+    </tr></thead><tbody>
+    ${filtered.map(s => {
+      const breakPct = ((s.close - s.bb_upper) / s.bb_upper * 100);
+      const bought = (latestRun?.new_entries || []).some(b => b.ticker === s.ticker);
+      return `<tr>
+        <td class="ticker-cell">${s.ticker.replace(".NS","")}</td>
+        <td class="r">${fmtRs(s.close)}</td>
+        <td class="r">${fmtRs(s.bb_upper)}</td>
+        <td class="r pnl pos">${fmtPct(breakPct)}</td>
+        <td class="r ${s.roc_12m >= 0 ? "pnl pos" : "pnl neg"}">${fmtPct(s.roc_12m)}</td>
+        <td class="r">${s.mcap_cr ? Number(s.mcap_cr).toLocaleString("en-IN") : "—"}</td>
+        <td>${bought ? '<span class="badge buy">BUYING</span>' : '<span class="badge" style="background:var(--pill-bg);color:var(--muted)">Skipped (slots full)</span>'}</td>
+      </tr>`;
+    }).join("")}
+    </tbody></table>`;
+}
+
+let equityChart = null;
+function renderHistory() {
+  const el = document.getElementById("historyTable");
+  if (!allRuns.length) { el.innerHTML = '<div class="empty">No run history yet</div>'; return; }
+
+  // Table
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>Date</th><th>Signal Week</th>
+      <th class="r">Portfolio</th><th class="r">Cash</th>
+      <th class="r">Positions</th><th class="r">Buys</th><th class="r">Exits</th><th>Status</th>
+    </tr></thead><tbody>
+    ${[...allRuns].reverse().map(r => `<tr>
+      <td>${r.run_date}</td>
+      <td>${r.signal_week || "—"}</td>
+      <td class="r">${fmtRs(r.portfolio_equity)}</td>
+      <td class="r">${fmtRs(r.cash)}</td>
+      <td class="r">${r.open_positions}</td>
+      <td class="r">${(r.new_entries||[]).length}</td>
+      <td class="r">${(r.exits||[]).length}</td>
+      <td><span class="badge ${r.status==="completed"?"hold":"stop"}">${r.status}</span></td>
+    </tr>`).join("")}
+    </tbody></table>`;
+
+  // Equity chart
+  const labels = allRuns.map(r => r.run_date);
+  const values = allRuns.map(r => r.portfolio_equity);
+  const ctx = document.getElementById("equityChart").getContext("2d");
+  if (equityChart) equityChart.destroy();
+  equityChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: "Portfolio Equity (₹)",
+        data: values,
+        borderColor: "#388bfd",
+        backgroundColor: "rgba(56,139,253,0.08)",
+        borderWidth: 2,
+        pointRadius: 3,
+        fill: true,
+        tension: 0.3,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { color: "#30363d" }, ticks: { color: "#8b949e", maxTicksLimit: 12 } },
+        y: {
+          grid: { color: "#30363d" }, ticks: { color: "#8b949e",
+            callback: v => "₹" + (v >= 1e5 ? (v/1e5).toFixed(1)+"L" : v.toLocaleString("en-IN"))
+          }
+        },
+      },
+    },
+  });
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+loadData();
+</script>
+</body>
+</html>
