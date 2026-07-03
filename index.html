@@ -226,13 +226,27 @@
     <h1>MILT <span>25</span> Screener</h1>
     <div class="run-meta" id="runMeta">Loading…</div>
   </div>
-  <button class="btn" onclick="loadData()">↻ Refresh</button>
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <input type="password" id="patInput" placeholder="GitHub PAT (repo scope)" autocomplete="off"
+      style="background:var(--surface2);border:1px solid var(--border);color:var(--text);
+      border-radius:6px;padding:7px 10px;font-size:12px;width:200px;outline:none">
+    <button id="patToggle" onclick="togglePat()"
+      style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;
+      padding:6px 10px;font-size:11px;cursor:pointer">show</button>
+    <button id="runBtn" onclick="triggerRun()" class="btn">
+      <span id="runBtnLabel">▶ Run Screen</span>
+    </button>
+    <button class="btn" onclick="loadData()" style="background:var(--surface2);border:1px solid var(--border)">↻ Refresh</button>
+  </div>
 </header>
+<div class="run-status" id="runStatus" style="padding:6px 24px;font-size:12px;color:var(--muted);
+  background:var(--surface);border-bottom:1px solid var(--border)"></div>
 
 <nav>
   <button class="active" onclick="showTab('actions',this)">This Week</button>
   <button onclick="showTab('portfolio',this)">Portfolio</button>
   <button onclick="showTab('signals',this)">All Signals</button>
+  <button onclick="showTab('universe',this)">Full Universe</button>
   <button onclick="showTab('history',this)">History</button>
   <button onclick="showTab('settings',this)">Settings</button>
 </nav>
@@ -272,6 +286,18 @@
     <div class="table-wrap">
       <div class="table-title">BB Breakout Signals — this week (sorted by ROC 12M)</div>
       <div id="signalsTable"></div>
+    </div>
+  </div>
+
+  <!-- ── Full Universe ── -->
+  <div id="tab-universe" class="tab-panel">
+    <div class="stats" id="universeStats"></div>
+    <div class="search-row">
+      <input id="uniSearch" type="text" placeholder="Filter by ticker…" oninput="renderUniverse()">
+    </div>
+    <div class="table-wrap">
+      <div class="table-title">Full Eligible Universe — indicators as of signal week (sorted by ROC 12M)</div>
+      <div id="universeTable"></div>
     </div>
   </div>
 
@@ -334,6 +360,102 @@ function saveConfig() {
 document.getElementById("cfgUrl").value = SB_URL;
 document.getElementById("cfgKey").value = SB_KEY;
 
+// ── GitHub trigger config ──────────────────────────────────────────────────
+const GITHUB_OWNER = "svsashank";
+const GITHUB_REPO  = "NSE_MILT25";
+
+function togglePat() {
+  const inp = document.getElementById("patInput");
+  const btn = document.getElementById("patToggle");
+  if (inp.type === "password") { inp.type = "text"; btn.textContent = "hide"; }
+  else { inp.type = "password"; btn.textContent = "show"; }
+}
+
+function setRunStatus(msg, cls) {
+  const el = document.getElementById("runStatus");
+  el.textContent = msg;
+  el.style.color = cls === "err" ? "var(--red)" : cls === "ok" ? "var(--green)" : "var(--muted)";
+}
+
+function resetRunBtn() {
+  const btn = document.getElementById("runBtn");
+  btn.disabled = false;
+  document.getElementById("runBtnLabel").textContent = "▶ Run Screen";
+}
+
+let pollTimer = null;
+let pollLatestId = null;
+
+async function getLatestRunId() {
+  try {
+    const rows = await sbGet("milt25_runs", "select=id&order=triggered_at.desc&limit=1");
+    return rows?.[0]?.id || null;
+  } catch { return null; }
+}
+
+async function triggerRun() {
+  const pat = document.getElementById("patInput").value.trim();
+  if (!pat) { setRunStatus("Paste your GitHub PAT first (repo scope).", "err"); return; }
+
+  const btn = document.getElementById("runBtn");
+  btn.disabled = true;
+  document.getElementById("runBtnLabel").textContent = "Running…";
+  setRunStatus("Triggering GitHub Actions…", "");
+
+  try {
+    const r = await fetch(
+      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/dispatches`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `token ${pat}`,
+          "Accept": "application/vnd.github.v3+json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ event_type: "run_milt25_screen" }),
+      }
+    );
+    if (r.status !== 204) {
+      const txt = await r.text();
+      throw new Error(`GitHub API ${r.status}: ${txt}`);
+    }
+    setRunStatus("✓ Triggered! Waiting for results (2–5 min)…", "");
+    pollLatestId = await getLatestRunId();
+    startPolling();
+  } catch (e) {
+    setRunStatus(`Error: ${e.message}`, "err");
+    resetRunBtn();
+  }
+}
+
+function startPolling() {
+  clearInterval(pollTimer);
+  let attempts = 0;
+  const MAX = 100; // 100 x 15s = 25 min timeout
+
+  pollTimer = setInterval(async () => {
+    attempts++;
+    const elapsed = attempts * 15;
+    setRunStatus(`⏳ Waiting… (${elapsed}s elapsed)`, "");
+
+    try {
+      const latestId = await getLatestRunId();
+      if (latestId && latestId !== pollLatestId) {
+        clearInterval(pollTimer);
+        setRunStatus(`✅ Screen complete`, "ok");
+        resetRunBtn();
+        await loadData();
+      }
+    } catch (e) { /* keep polling */ }
+
+    if (attempts >= MAX) {
+      clearInterval(pollTimer);
+      setRunStatus("Timed out — check GitHub Actions for status.", "err");
+      resetRunBtn();
+    }
+  }, 15000);
+}
+
 // ── Tab nav ───────────────────────────────────────────────────────────────────
 function showTab(name, btn) {
   document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
@@ -385,6 +507,7 @@ function render() {
   renderExits();
   renderPortfolio();
   renderSignals();
+  renderUniverse();
   renderHistory();
 }
 
@@ -563,6 +686,69 @@ function renderSignals() {
         <td class="r ${s.roc_12m >= 0 ? "pnl pos" : "pnl neg"}">${fmtPct(s.roc_12m)}</td>
         <td class="r">${s.mcap_cr ? Number(s.mcap_cr).toLocaleString("en-IN") : "—"}</td>
         <td>${bought ? '<span class="badge buy">BUYING</span>' : '<span class="badge" style="background:var(--pill-bg);color:var(--muted)">Skipped (slots full)</span>'}</td>
+      </tr>`;
+    }).join("")}
+    </tbody></table>`;
+}
+
+function renderUniverse() {
+  const statsEl = document.getElementById("universeStats");
+  const el = document.getElementById("universeTable");
+  const raw = latestRun?.universe || [];
+
+  if (!raw.length) {
+    if (statsEl) statsEl.innerHTML = "";
+    el.innerHTML = '<div class="empty">No universe snapshot in the latest run yet — run the screener to populate this tab.</div>';
+    return;
+  }
+
+  const breakouts = raw.filter(r => r.breakout).length;
+  const held      = raw.filter(r => r.held).length;
+  if (statsEl) {
+    statsEl.innerHTML = `
+      <div class="stat-card"><div class="label">Universe Size</div><div class="value blue">${raw.length}</div></div>
+      <div class="stat-card"><div class="label">BB Breakouts</div><div class="value green">${breakouts}</div></div>
+      <div class="stat-card"><div class="label">Currently Held</div><div class="value">${held}</div></div>
+    `;
+  }
+
+  const q = (document.getElementById("uniSearch")?.value || "").toUpperCase();
+  const filtered = q ? raw.filter(r => r.ticker.includes(q)) : raw;
+
+  if (!filtered.length) {
+    el.innerHTML = `<div class="empty">No tickers matching "${q}"</div>`;
+    return;
+  }
+
+  el.innerHTML = `<table>
+    <thead><tr>
+      <th>#</th><th>Ticker</th><th class="r">Close</th><th class="r">BB Upper</th>
+      <th class="r">Dist to BB</th><th class="r">MA23</th><th class="r">ATR14</th>
+      <th class="r">ROC 12M</th><th class="r">MCap (Cr)</th><th>Status</th>
+    </tr></thead><tbody>
+    ${filtered.map((r, i) => {
+      let rowStyle = "";
+      let statusBadge = '<span class="badge" style="background:var(--pill-bg);color:var(--muted)">—</span>';
+      if (r.held) {
+        rowStyle = "background:rgba(56,139,253,.06)";
+        statusBadge = '<span class="badge hold">HELD</span>';
+      } else if (r.breakout) {
+        rowStyle = "background:rgba(63,185,80,.06)";
+        statusBadge = '<span class="badge buy">BREAKOUT</span>';
+      }
+      const distClass = r.dist_to_bb_pct != null ? (r.dist_to_bb_pct >= 0 ? "pnl pos" : "pnl neg") : "";
+      const rocClass  = r.roc_12m != null ? (r.roc_12m >= 0 ? "pnl pos" : "pnl neg") : "";
+      return `<tr style="${rowStyle}">
+        <td class="r" style="color:var(--muted)">${i + 1}</td>
+        <td class="ticker-cell">${r.ticker.replace(".NS","")}</td>
+        <td class="r">${r.close != null ? fmtRs(r.close) : "—"}</td>
+        <td class="r">${r.bb_upper != null ? fmtRs(r.bb_upper) : "—"}</td>
+        <td class="r ${distClass}">${r.dist_to_bb_pct != null ? fmtPct(r.dist_to_bb_pct) : "—"}</td>
+        <td class="r">${r.ma23 != null ? fmtRs(r.ma23) : "—"}</td>
+        <td class="r">${r.atr14 != null ? fmtRs(r.atr14) : "—"}</td>
+        <td class="r ${rocClass}">${r.roc_12m != null ? fmtPct(r.roc_12m) : "—"}</td>
+        <td class="r">${r.mcap_cr ? Number(r.mcap_cr).toLocaleString("en-IN") : "—"}</td>
+        <td>${statusBadge}</td>
       </tr>`;
     }).join("")}
     </tbody></table>`;
