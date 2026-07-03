@@ -5,6 +5,10 @@ on:
     - cron: "30 11 * * 5"
   workflow_dispatch:
     inputs:
+      params:
+        description: "JSON string of strategy parameter overrides (optional)"
+        required: false
+        default: ""
       dry_run:
         description: "Dry run (print signals but do not write to Supabase)"
         required: false
@@ -34,4 +38,5 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          SCREEN_PARAMS: ${{ github.event.client_payload.params || github.event.inputs.params || '' }}
         run: python -m core.milt25_screener
