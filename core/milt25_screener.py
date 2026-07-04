@@ -17,7 +17,7 @@ Weekly bars: daily OHLCV resampled to W-FRI.
 """
 
 import os, json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -30,6 +30,7 @@ from core.history_store import load_history, merge_history, raw_multiindex_to_fi
 # ── Config ────────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]   # must be service_role for writes
+DRY_RUN = os.environ.get("DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
 
 SHARES_JSON_URL = (
     "https://raw.githubusercontent.com/svsashank/NSE_1000Cr_Momentum"
@@ -81,6 +82,10 @@ def sb_get(table, params=""):
     return r.json()
 
 def sb_post(table, payload):
+    if DRY_RUN:
+        print(f"    [DRY RUN] would POST {table}: "
+              f"{json.dumps(payload, default=str)[:160]}...")
+        return []
     r = requests.post(
         f"{SUPABASE_URL}/rest/v1/{table}",
         headers={
@@ -96,6 +101,10 @@ def sb_post(table, payload):
     return r.json()
 
 def sb_patch(table, row_filter, payload):
+    if DRY_RUN:
+        print(f"    [DRY RUN] would PATCH {table}?{row_filter}: "
+              f"{json.dumps(payload, default=str)[:160]}...")
+        return []
     r = requests.patch(
         f"{SUPABASE_URL}/rest/v1/{table}?{row_filter}",
         headers={
@@ -189,7 +198,7 @@ def fmt(x):
 def run():
     today = date.today()
     print(f"\n{'='*60}")
-    print(f"MILT 25 Screener -- {today}")
+    print(f"MILT 25 Screener -- {today}" + ("  [DRY RUN — no Supabase writes]" if DRY_RUN else ""))
     print(f"{'='*60}")
 
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -278,7 +287,7 @@ def run():
             "atr_trail_stop": None if np.isnan(trail_stop) else round(trail_stop, 2),
             "ma23_stop": None if np.isnan(ma) else round(ma, 2),
             "current_price": None if np.isnan(c) else round(c, 2),
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
         if reason:
@@ -319,10 +328,13 @@ def run():
 
     for pos in open_positions:
         if pos["ticker"] in positions_to_close:
-            ep   = next((e["exit_price"] for e in exits if e["ticker"] == pos["ticker"]),
-                        float(pos["entry_price"]))
-            gain = ep / float(pos["entry_price"]) if float(pos["entry_price"]) else 1
-            cash += float(pos["allocated_equity"]) * gain
+            ep = next((e["exit_price"] for e in exits if e["ticker"] == pos["ticker"]),
+                      float(pos["entry_price"]))
+            # Credit actual position value (shares x exit price) — consistent
+            # with how open holdings are marked (shares x close). The previous
+            # allocated_equity x gain approximation drifted equity on every
+            # exit by the integer-share rounding remainder.
+            cash += float(pos["shares"]) * ep
 
     print("\n[7] Building full universe snapshot + scanning entry signals...")
     universe_snapshot = []
@@ -377,17 +389,18 @@ def run():
             continue
         hard_stop = round(exec_price * (1 - cfg["hard_stop_pct"]), 2)
 
+        cost = shares_qty * exec_price   # actual cash spent (integer shares)
         sb_post("milt25_positions", {
             "ticker": ticker, "entry_date": str(today), "entry_price": exec_price,
-            "shares": shares_qty, "allocated_equity": round(alloc, 2),
+            "shares": shares_qty, "allocated_equity": round(cost, 2),
             "hard_stop": hard_stop, "highest_high": exec_price,
             "atr_trail_stop": None, "ma23_stop": None,
             "current_price": exec_price, "status": "open",
         })
-        cash -= alloc
+        cash -= cost
         new_entries.append({**cand, "shares": shares_qty,
-                            "allocated_equity": round(alloc, 2), "hard_stop": hard_stop})
-        print(f"    BUY   {ticker:20s}  @ Rs{exec_price:.2f}  qty={shares_qty}  alloc=Rs{alloc:,.0f}")
+                            "allocated_equity": round(cost, 2), "hard_stop": hard_stop})
+        print(f"    BUY   {ticker:20s}  @ Rs{exec_price:.2f}  qty={shares_qty}  cost=Rs{cost:,.0f}")
 
     all_open_after = remaining_open + [e["ticker"] for e in new_entries]
     holdings_value = 0.0
@@ -409,7 +422,7 @@ def run():
         "open_positions": len(all_open_after), "new_entries": new_entries,
         "exits": exits, "signals": candidates, "eligible_universe": len(eligible),
         "universe": universe_snapshot, "config_used": cfg,
-        "status": "completed", "triggered_at": datetime.utcnow().isoformat(),
+        "status": "completed", "triggered_at": datetime.now(timezone.utc).isoformat(),
     })
 
     print(f"\n{'='*60}")
